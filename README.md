@@ -62,3 +62,9 @@ Use Twilio Content Template Builder and submit a WhatsApp-approved template. Exa
 Set `TWILIO_CONTENT_SID` to its `HX...` identifier. Set `TWILIO_WHATSAPP_FROM` and `ALERT_WHATSAPP_TO` to WhatsApp-enabled E.164 phone numbers (such as `+1...`), using Cloudflare secrets, not source files. An approved template, production-enabled sender, and opted-in recipient are necessary for unsupervised 12-hour notifications. The sandbox is for testing and not equivalent to a production sender. Twilio/Meta messaging fees are separate from SerpApi's $25 subscription.
 
 **Important:** This integration is mocked in automated tests. No live WhatsApp message, live fare quote, or hosted Cloudflare deployment has been verified without account credentials.
+
+
+## Airline-direct fares only (new)
+The backend now makes a Google Flights booking-options request using the selected return flight's `booking_token`. It **only** displays and alerts on prices where `booking_options[].together.airline === true`, the named seller is one of the twelve approved airlines, and `separate_tickets` is not true. Third-party agency quotes and fares with missing booking-provider proof are omitted. `price` is the airline-sold option from Google Flights, *not* a live checkout confirmation on the airline website. Always verify the fare on the airline checkout page before purchasing.
+
+This adds at least one provider request for each candidate itinerary and therefore reduces date-pair coverage under the monthly credit allowance. The interface reports checked combinations; it does not claim exhaustive coverage. If Google Flights does not provide a booking token or airline-sold option, that itinerary will not appear or trigger an alert.

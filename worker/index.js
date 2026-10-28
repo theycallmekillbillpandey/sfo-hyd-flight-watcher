@@ -43,10 +43,40 @@ export function allPairs(){return Array.from({length:15},(_,i)=>date(START+i*864
 function cors(origin,env){const allowed=(env.ALLOWED_ORIGIN||'').replace(/\/$/,'');return origin===allowed?{'Access-Control-Allow-Origin':origin,'Vary':'Origin'}:{}}
 function response(body,status,origin,env){return new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...cors(origin,env)}})}
 async function google(params,key,env,mode){await charge(env,mode);const url=new URL('https://serpapi.com/search.json');for(const [k,v] of Object.entries({...params,engine:'google_flights',api_key:key,departure_id:'SFO',arrival_id:'HYD',type:'1',currency:'USD',adults:'1',travel_class:'1',include_airlines:allowedCodes.join(','),max_duration:String(maxMinutes)}))url.searchParams.set(k,v);const res=await fetch(url,{signal:AbortSignal.timeout(25000)});if(!res.ok)throw new Error(`Flight provider HTTP ${res.status}`);const data=await res.json();if(data.error)throw new Error(String(data.error));return data}
-async function scanPair(out,back,key,env,mode="manual",maxCalls=4){let calls=0;const first=await google({outbound_date:out,return_date:back},key,env,mode);calls++;const outbounds=options(first).filter(o=>valid(o)&&o.departure_token);const results=[];const errors=[];
-// Search up to 3 qualifying outbound choices per pair, not just the first.
-for(const outbound of outbounds.slice(0,Math.max(0,maxCalls-1))){try{const second=await google({outbound_date:out,return_date:back,departure_token:outbound.departure_token},key,env,mode);calls++;for(const inbound of options(second)){if(!valid(inbound)||!Number.isFinite(inbound.price))continue;results.push({out,back,price:inbound.price,outbound:summary(outbound),inbound:summary(inbound),url:`https://www.google.com/travel/flights?${new URLSearchParams({q:`SFO to HYD ${out} return ${back}`})}`})}}catch(e){errors.push(e.message);if(/quota|limit|key|credits|budget|period ended/i.test(e.message))throw e}}
-return {results:results.sort((a,b)=>a.price-b.price).slice(0,12),calls,errors,considered:outbounds.length,checked:Math.min(outbounds.length,Math.max(0,maxCalls-1))}}
+// Only airline-issued, single-ticket booking options qualify for price alerts.
+// SerpApi's booking-options endpoint marks genuine airline sellers with airline:true.
+export function verifiedAirlineOffers(data){
+ const arr=Array.isArray(data?.booking_options)?data.booking_options:[];
+ return arr.filter(o=>!o.separate_tickets && o.together?.airline===true &&
+   airlineAllowed(o.together.book_with) && Number.isFinite(o.together.price) && o.together.price>0)
+  .map(o=>({seller:o.together.book_with,price:o.together.price}))
+  .sort((a,b)=>a.price-b.price);
+}
+async function scanPair(out,back,key,env,mode="manual",maxCalls=5){
+ let calls=0;const errors=[];const results=[];let considered=0,checked=0;
+ const first=await google({outbound_date:out,return_date:back},key,env,mode);calls++;
+ const outbounds=options(first).filter(o=>valid(o)&&o.departure_token);
+ considered=outbounds.length;
+ // Every confirmed result takes an initial search, a return search, and a booking lookup.
+ for(const outbound of outbounds){
+  if(calls+2>maxCalls)break;
+  try{
+   const second=await google({outbound_date:out,return_date:back,departure_token:outbound.departure_token},key,env,mode);calls++;checked++;
+   for(const inbound of options(second)){
+    if(calls>=maxCalls)break;
+    if(!valid(inbound)||!inbound.booking_token)continue;
+    const booking=await google({booking_token:inbound.booking_token},key,env,mode);calls++;
+    const offers=verifiedAirlineOffers(booking);
+    if(!offers.length)continue;
+    const selected=offers[0];
+    results.push({out,back,price:selected.price,source:'airline-direct via Google Flights booking options',
+     seller:selected.seller,airlineDirectVerified:true,outbound:summary(outbound),inbound:summary(inbound),
+     url:`https://www.google.com/travel/flights?${new URLSearchParams({q:`SFO to HYD ${out} return ${back}`})}`});
+   }
+  }catch(e){errors.push(e.message);if(/quota|limit|key|credits|budget|period ended/i.test(e.message))throw e}
+ }
+ return {results:results.sort((a,b)=>a.price-b.price).slice(0,12),calls,errors,considered,checked};
+}
 // A scheduled Worker doesn't need a persistent process. KV stores the rolling cursor,
 // latest monitored fares and notification deduplication across invocations.
 export function shouldAlert(price, previous, threshold=1500){return Number.isFinite(price) && (price<threshold && (previous==null || price<previous) || previous!=null && previous-price>=100)}
@@ -89,10 +119,11 @@ export async function runMonitor(env){
  for(let i=0;i<batch && providerCalls<perRun;i++){
   const pair=pairs[(cursor+i)%pairs.length];
   try{
-   const r=await scanPair(pair.out,pair.back,env.SERPAPI_KEY,env,"auto",Math.min(4,perRun-providerCalls));
+   const r=await scanPair(pair.out,pair.back,env.SERPAPI_KEY,env,"auto",Math.min(5,perRun-providerCalls));
    providerCalls+=r.calls;
    if(r.errors.length)errors.push(`${pair.out}/${pair.back}: ${r.errors[0]}`);
    for(const offer of r.results){
+    if(!offer.airlineDirectVerified)continue;
     if(!cheapest || offer.price<cheapest.price)cheapest=offer;
     const key=`fare:${offer.out}:${offer.back}:${offer.outbound.airlines}:${offer.inbound.airlines}:${offer.outbound.duration}:${offer.inbound.duration}`;
     const previousRaw=await env.FARE_STORE.get(key);
@@ -133,7 +164,7 @@ export default {
   if(!env.SERPAPI_KEY)return response({error:'Server missing SERPAPI_KEY'},503,origin,env);
   if(!env.FARE_STORE)return response({error:'KV binding is missing'},503,origin,env);
   if(stopped(env))return response({error:'Monitoring period ended'},410,origin,env);
-  try{return response({out,back,...await scanPair(out,back,env.SERPAPI_KEY,env,"manual")},200,origin,env)}catch(e){return response({error:e.message},502,origin,env)}
+  try{return response({out,back,...await scanPair(out,back,env.SERPAPI_KEY,env,"manual",5)},200,origin,env)}catch(e){return response({error:e.message},502,origin,env)}
  }
 };
 export {valid,scanPair,allowedDate};

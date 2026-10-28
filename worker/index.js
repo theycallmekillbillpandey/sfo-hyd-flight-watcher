@@ -80,32 +80,31 @@ async function scanPair(out,back,key,env,mode="manual",maxCalls=5){
 // A scheduled Worker doesn't need a persistent process. KV stores the rolling cursor,
 // latest monitored fares and notification deduplication across invocations.
 export function shouldAlert(price, previous, threshold=1500){return Number.isFinite(price) && (price<threshold && (previous==null || price<previous) || previous!=null && previous-price>=100)}
-// Twilio's WhatsApp Content Templates are required for scheduled/out-of-session alerts.
-// The user must opt in and approve the destination number. Content SID must point to
-// an approved WhatsApp template containing {{1}} ... {{7}} in this order.
-export function whatsappConfigured(env){return !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_WHATSAPP_FROM && env.ALERT_WHATSAPP_TO && env.TWILIO_CONTENT_SID)}
-export async function sendWhatsApp(env,offer,previous){
- if(!whatsappConfigured(env))return false;
- const normalizePhone=number => String(number||'').startsWith('whatsapp:')?String(number):'whatsapp:'+String(number);
- const fields=new URLSearchParams({
-  To:normalizePhone(env.ALERT_WHATSAPP_TO), From:normalizePhone(env.TWILIO_WHATSAPP_FROM),
-  ContentSid:env.TWILIO_CONTENT_SID,
-  ContentVariables:JSON.stringify({
-    '1':'$'+offer.price,
-    '2':offer.outbound.airlines+' / '+offer.inbound.airlines,
-    '3':offer.out,
-    '4':offer.back,
-    '5':Math.floor(offer.outbound.duration/60)+'h '+offer.outbound.duration%60+'m',
-    '6':Math.floor(offer.inbound.duration/60)+'h '+offer.inbound.duration%60+'m',
-    '7':offer.url
-  })
+// Resend transactional email via HTTPS. For the onboarding@resend.dev sender,
+// Resend restricts recipients to the account owner's verified email address.
+// Use a sender from your own verified domain for production sending.
+export function emailConfigured(env){return !!(env.RESEND_API_KEY && env.ALERT_EMAIL_TO && env.ALERT_EMAIL_FROM)}
+export async function sendEmail(env,offer,previous){
+ if(!emailConfigured(env))return false;
+ const duration = d => `${Math.floor(d/60)}h ${d%60}m`;
+ const line = [
+  `Round trip: $${offer.price} USD (airline-sold booking option)`,
+  `Airline seller: ${offer.seller}`,
+  `Flight carriers: ${offer.outbound.airlines} / ${offer.inbound.airlines}`,
+  `Depart SFO: ${offer.out}`,
+  `Depart HYD: ${offer.back}`,
+  `Outbound / return durations: ${duration(offer.outbound.duration)} / ${duration(offer.inbound.duration)}`,
+  previous==null?'First observed price':`Previous lowest observed: $${previous} USD`,
+  `View itinerary: ${offer.url}`,
+  'Price is from Google Flights airline booking options; check final airline checkout before paying.'
+ ].join('\n');
+ const resp=await fetch('https://api.resend.com/emails',{
+  method:'POST',
+  headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json'},
+  body:JSON.stringify({from:env.ALERT_EMAIL_FROM,to:[env.ALERT_EMAIL_TO],
+   subject:`Flight fare alert: $${offer.price} SFO–HYD (${offer.out} / ${offer.back})`,text:line})
  });
- const sid=env.TWILIO_ACCOUNT_SID;
- const auth=btoa(sid+':'+env.TWILIO_AUTH_TOKEN);
- const resp=await fetch('https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(sid)+'/Messages.json',{
-  method:'POST',headers:{Authorization:'Basic '+auth,'Content-Type':'application/x-www-form-urlencoded'},body:fields
- });
- if(!resp.ok)throw new Error('WhatsApp API error '+resp.status);
+ if(!resp.ok){const body=(await resp.text()).slice(0,400);throw Error(`Email API error ${resp.status}: ${body}`)}
  return true;
 }
 export async function runMonitor(env){
@@ -129,8 +128,8 @@ export async function runMonitor(env){
     const previousRaw=await env.FARE_STORE.get(key);
     const previous=previousRaw===null?null:Number(previousRaw);
     const threshold=Number(env.ALERT_PRICE_USD)||1500;
-    if(shouldAlert(offer.price,previous,threshold) && whatsappConfigured(env)){
-     try{if(await sendWhatsApp(env,offer,previous))alerts++}catch(e){errors.push(e.message)}
+    if(shouldAlert(offer.price,previous,threshold) && emailConfigured(env)){
+     try{if(await sendEmail(env,offer,previous))alerts++}catch(e){errors.push(e.message)}
     }
     // Keep the lowest observed fare, so an increase never resets the alert baseline.
     if(previous===null || offer.price<previous)await env.FARE_STORE.put(key,String(offer.price),{expirationTtl:60*60*24*90});
@@ -142,7 +141,7 @@ export async function runMonitor(env){
  }
  cursor=(cursor+checked)%pairs.length;
  await env.FARE_STORE.put('cursor',String(cursor));
- const state={startedAt,checked,totalPairs:60,providerCalls,alerts,errors:errors.slice(0,8),nextPair:cursor,cheapest,alertPrice:Number(env.ALERT_PRICE_USD)||1500,notificationConfigured:whatsappConfigured(env),notificationChannel:'WhatsApp (Twilio)',allowedAirlines:allowedCodes,mode:'credit-limited rotation',pairsPerRun:batch,budget:await budgetStatus(env),stopAfter:env.STOP_AFTER_DATE||DEFAULT_STOP};
+ const state={startedAt,checked,totalPairs:60,providerCalls,alerts,errors:errors.slice(0,8),nextPair:cursor,cheapest,alertPrice:Number(env.ALERT_PRICE_USD)||1500,notificationConfigured:emailConfigured(env),notificationChannel:'Email (Resend)',allowedAirlines:allowedCodes,mode:'credit-limited rotation',pairsPerRun:batch,budget:await budgetStatus(env),stopAfter:env.STOP_AFTER_DATE||DEFAULT_STOP};
  await env.FARE_STORE.put('status',JSON.stringify(state));
  return state;
 }

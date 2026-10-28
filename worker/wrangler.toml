@@ -2,9 +2,9 @@ name = "sfo-hyd-flight-check"
 main = "index.js"
 compatibility_date = "2026-10-01"
 
-# Scheduled at midnight/noon UTC. Works even while your laptop is off.
+# Scheduled at 03:00 UTC (7 PM PST; during PDT this is 8 PM). Works even while your laptop is off.
 [triggers]
-crons = ["0 0,12 * * *"]
+crons = ["0 3 * * *"]
 
 [vars]
 ALLOWED_ORIGIN = "https://YOUR_USERNAME.github.io"
@@ -12,10 +12,10 @@ ALERT_PRICE_USD = "1500"
 # An 8-pair rotating scheduled batch, capped at 15 API calls per run.
 # Monthly allowances: 900 automatic + 100 manual requests. These are protective
 # soft counters, not transactional financial controls.
-PAIRS_PER_RUN = "8"
+PAIRS_PER_RUN = "60"
 MONTHLY_REQUEST_CAP = "1000"
 MANUAL_REQUEST_CAP = "100"
-AUTO_CALLS_PER_RUN = "15"
+AUTO_CALLS_PER_RUN = "30"
 STOP_AFTER_DATE = "2026-11-27"
 
 # Add a Cloudflare KV namespace using the CLI after creating one:

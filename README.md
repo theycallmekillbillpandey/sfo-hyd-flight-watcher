@@ -1,70 +1,24 @@
-# SFO ↔ HYD Flight Watcher — one-month $25-first deployment
+# SFO ↔ HYD Flight Watcher — email notification edition
 
-**Independent of ChatGPT.** GitHub Pages hosts the website, Cloudflare Worker serves flight-price requests, Cloudflare Cron runs automatic checks every 12 hours, Cloudflare KV holds search counters and alerts, and Twilio WhatsApp sends alerts. A Cloudflare account, SerpApi key, and an approved Twilio WhatsApp sender/template are required; this ZIP has **not** been deployed to your accounts or tested against live paid flight data.
+Browser-only Cloudflare Worker + GitHub Pages deployment. **No WhatsApp or Twilio account required.** The Worker calls [Resend](https://resend.com) to email qualifying airline-sold fare alerts.
 
-## Trip and alerts
-- Outbound: SFO–HYD, depart **December 11–25, 2026**.
-- Return: HYD–SFO, depart **January 14–17, 2027**.
-- Economy, one adult, Air India excluded including operating segments, maximum 35 hours each way.
-- Only these 12 airlines may appear in an itinerary: Qatar Airways (QR), Emirates (EK), Singapore Airlines (SQ), Cathay Pacific (CX), Lufthansa (LH), British Airways (BA), KLM (KL), Etihad Airways (EY), Turkish Airlines (TK), United Airlines (UA), Virgin Atlantic (VS), Swiss International Air Lines (LX). Air India is excluded on every segment. Where the data provider does not disclose the actual operating carrier, it cannot be independently confirmed.
-- Notify on verified observed fare **below $1,500**, or at least **$100 lower** than a prior comparable observed itinerary (same dates, carriers, and direction durations).
-- Monitoring scheduled twice daily, and automatically **stops after November 27, 2026 (UTC)**. Edit `STOP_AFTER_DATE` to change it.
+## Update an existing installation (browser only)
+1. In Cloudflare > Workers & Pages > `sfo-hyd-flight-check` > **Edit code**, replace the code with **the complete contents of `worker/index.js` in this ZIP**, and Deploy. This replaces WhatsApp sending with email sending.
+2. In your Worker > Settings > Variables and Secrets, add **Secret** `RESEND_API_KEY` (create an API key at https://resend.com/api-keys).
+3. Add **Text** `ALERT_EMAIL_TO` with the email address receiving alerts.
+4. Add **Text** `ALERT_EMAIL_FROM` with `Flight Watch <onboarding@resend.dev>` for initial testing **to your own Resend account email only**. For unrestricted production sending, verify a domain in Resend and change this to `Flight Watch <alerts@YOURDOMAIN.COM>`.
+5. Old `TWILIO_*` and `ALERT_WHATSAPP_TO` secrets can be deleted after email alerts are verified; they are no longer used by this edition.
+6. Under Worker > Settings > Triggers > Cron Triggers, **remove old schedules** and add `0 3 * * *` for daily **7 PM PST** during standard time. Cloudflare cron is UTC; **during daylight time use `0 2 * * *` for 7 PM PDT**. No DST-aware cron in this setup, so update the schedule when clocks change.
+7. Leave the existing **`FARE_STORE`** KV namespace binding and **`SERPAPI_KEY`** secret in place. The existing GitHub `config.js` URL can stay unchanged because the Worker URL stays the same.
+8. Optional dashboard variables: `PAIRS_PER_RUN=60`; `AUTO_CALLS_PER_RUN=30` (the current code *hard-caps per-run requests at 30* even if set higher); `MONTHLY_REQUEST_CAP=1000`; `MANUAL_REQUEST_CAP=100`; `ALERT_PRICE_USD=1500`; `STOP_AFTER_DATE=2026-11-27`; `ALLOWED_ORIGIN=https://YOUR_USERNAME.github.io`. **A value of 60 date pairs does not guarantee all 60 are completed in a run.**
+9. Upload updated `index.html` to GitHub Pages and commit. `config.js` is unchanged unless you have a different Worker URL.
+10. Verify `notificationConfigured: true` at the website monitoring status, then verify actual email delivery when a *real* qualifying alert occurs. For an immediate delivery test, use Resend's test email tool in its dashboard. This does **not** verify the Worker email pathway; that still needs an integration test with test data before relying on it.
 
-## Budget-first settings
-The live SerpApi Starter plan advertised on 2026-10-27 is $25/month with 1,000 searches. This project defaults to a best-effort **1,000 provider-request/month ceiling**, split **900 automatic / 100 manual**. Each cron run handles up to 8 date pairs and up to 15 provider calls, rotating through all 60 pairs. **This is not full 60-pair coverage every 12 hours.** The page shows the latest batch size and consumed search credits. Automated coverage is dependent on how many outbound choices the provider returns, the quota, and any errors.
+## Trip requirements
+Outbound SFO→HYD: Dec 11–25, 2026. Return HYD→SFO: Jan 14–17, 2027. One economy traveler, each direction ≤35h. Allowed carriers: QR, EK, SQ, CX, LH, BA, KL, EY, TK, UA, VS, LX; no Air India. Alerts for airline-sold round-trip price <USD 1500 or drop ≥USD 100 versus previous lowest observed comparable fare. Airline-direct seller must be explicitly flagged by the Google Flights booking response.
 
-**IMPORTANT BILLING WARNING:** Cloudflare KV is eventually consistent, not atomic. Counters are a useful safeguard, **NOT a guaranteed hard dollar cap** under concurrent requests. Use SerpApi's provider-side search allowance, disable overages if supported, and cap/remove your subscription in the SerpApi billing dashboard. Your SerpApi subscription does not automatically cancel because this tracker stops checking.
+## Cost and coverage
+Resend currently offers a free tier up to 3,000 emails/month and 100/day. Email volume is normally minimal; the paid cost is for SerpApi searches, not email. This tracker has a **1,000-request/month best-effort software limit**. **Daily full 60-pair checks are impossible within that quota**: at least 1,800 base searches/month, plus more for return and booking-option checks. Worker per-run call cap is internally limited to 30, so it rotates and/or stops early. Counters in KV are non-atomic and not a guaranteed billing limit. Stop date is Nov 27, 2026. Always verify final prices on the airline site. Not live tested without your accounts.
 
-## Deploy: one time
-1. Create GitHub repo and enable **Settings > Pages > Deploy from branch > main, /(root)**. Upload `index.html`, `config.js` and optionally this README (worker files can also live in the same repository).
-2. Create Cloudflare account, create a SerpApi account and select an appropriate plan, create a Twilio WhatsApp sender, obtain recipient opt-in, and approve an out-of-session WhatsApp Content Template with seven sequential variables. Keep all secrets private.
-3. Edit `worker/wrangler.toml`: replace `ALLOWED_ORIGIN` with your actual Pages origin, e.g. `https://YOURNAME.github.io` (not the repo-specific path). Review `STOP_AFTER_DATE` and allowance variables. The schedule is 00:00 and 12:00 **UTC**.
-4. In a terminal with Node.js installed:
-
-```bash
-cd worker
-npm install
-npx wrangler login
-npx wrangler kv namespace create FARE_STORE
-```
-
-5. Copy KV namespace ID printed by the command. Uncomment the `[[kv_namespaces]]` lines in `worker/wrangler.toml` and enter the ID. Then:
-
-```bash
-npx wrangler secret put SERPAPI_KEY
-npx wrangler secret put TWILIO_ACCOUNT_SID
-npx wrangler secret put TWILIO_AUTH_TOKEN
-npx wrangler secret put TWILIO_WHATSAPP_FROM
-npx wrangler secret put ALERT_WHATSAPP_TO
-npx wrangler secret put TWILIO_CONTENT_SID
-npx wrangler deploy
-```
-
-6. Replace the placeholder in root `config.js` with the worker `https://...workers.dev` address from deployment. Commit/push changes to GitHub. Visit the GitHub Pages URL and use **Check flights now**. The backend rotates scheduled checks even when the website is closed.
-7. Verify in Cloudflare **Workers & Pages > your Worker > Settings > Triggers** that the Cron Trigger is installed, then check your Worker logs/status after it fires. Test a WhatsApp notification by creating a monitored offer below threshold with a test API response (do not assume a test response is a real fare).
-
-## Technical and coverage limitations
-- An interactive **Check flights now** will stop automatically when the manual allowance (100 requests/month) is exhausted. It will generally be unable to cover all 60 pairs in a month alongside frequent rechecks; this is intentional for $25-first monitoring.
-- One round-trip result typically requires an outbound and another return-selection provider call. We inspect up to 3 eligible outbound options per date pair (subject to per-run allowance). We do not guarantee absolute cheapest fares or coverage of every carrier.
-- Flight links point to date-based Google Flights searches, not to a locked-in booking checkout. Verify fare and segment operators before buying.
-- The Worker checks Origin headers for ordinary browser calls. This is **not robust authentication or a hard abuse defense**. Because the repository is public, use Cloudflare rate limiting/access controls or a private authentication scheme to deter third-party calls if broad exposure matters.
-- SerpApi pricing, APIs, and Cloudflare free-tier limits can change. Only fake responses were used to test the integration. Complete deployment and live API verification are still required.
-- **Monthly usage counters reset on the first day of each UTC month**, not after exactly 30 days. The monitoring stop date is independent of this reset.
-
-## Tests
-From the project root, run: `node --test tests/*.test.js` (11 local tests). They cover date generation, airline/duration exclusions, mocked two-stage Google Flights search, budget exhaustion, origin rejection, and monitoring expiry.
-
-## WhatsApp template setup
-Use Twilio Content Template Builder and submit a WhatsApp-approved template. Example template:
-
-> Flight fare alert: {{1}} round trip. Carriers: {{2}}. Depart SFO: {{3}}. Depart HYD: {{4}}. Outbound duration: {{5}}. Return duration: {{6}}. Check this itinerary: {{7}}. Fares may change.
-
-Set `TWILIO_CONTENT_SID` to its `HX...` identifier. Set `TWILIO_WHATSAPP_FROM` and `ALERT_WHATSAPP_TO` to WhatsApp-enabled E.164 phone numbers (such as `+1...`), using Cloudflare secrets, not source files. An approved template, production-enabled sender, and opted-in recipient are necessary for unsupervised 12-hour notifications. The sandbox is for testing and not equivalent to a production sender. Twilio/Meta messaging fees are separate from SerpApi's $25 subscription.
-
-**Important:** This integration is mocked in automated tests. No live WhatsApp message, live fare quote, or hosted Cloudflare deployment has been verified without account credentials.
-
-
-## Airline-direct fares only (new)
-The backend now makes a Google Flights booking-options request using the selected return flight's `booking_token`. It **only** displays and alerts on prices where `booking_options[].together.airline === true`, the named seller is one of the twelve approved airlines, and `separate_tickets` is not true. Third-party agency quotes and fares with missing booking-provider proof are omitted. `price` is the airline-sold option from Google Flights, *not* a live checkout confirmation on the airline website. Always verify the fare on the airline checkout page before purchasing.
-
-This adds at least one provider request for each candidate itinerary and therefore reduces date-pair coverage under the monthly credit allowance. The interface reports checked combinations; it does not claim exhaustive coverage. If Google Flights does not provide a booking token or airline-sold option, that itinerary will not appear or trigger an alert.
+## Note about sender domain
+Resend's `onboarding@resend.dev` is for initial testing to your registered email. To send without test-domain restrictions (e.g. to another account), add a verified sending domain in the Resend dashboard; this requires owning/controlling a domain. No WhatsApp approval or Twilio template is needed.

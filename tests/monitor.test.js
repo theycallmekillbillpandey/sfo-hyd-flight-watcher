@@ -1,0 +1,4 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {allPairs,shouldAlert,runMonitor} from '../worker/index.js';
+test('60 exact date pairs',()=>{const p=allPairs();assert.equal(p.length,60);assert.equal(p[0].out,'2026-12-11');assert.equal(p[59].back,'2027-01-17')});
+test('threshold and drop',()=>{assert.equal(shouldAlert(1499,null),true);assert.equal(shouldAlert(1500,null),false);assert.equal(shouldAlert(1800,1900),true);assert.equal(shouldAlert(1801,1900),false);assert.equal(shouldAlert(1400,1390),false)});
+test('scheduled monitor stores cursor and status; no key fails',async()=>{const records=new Map();const kv={get:async k=>records.get(k)??null,put:async(k,v)=>{records.set(k,v)}};await assert.rejects(()=>runMonitor({FARE_STORE:kv}),/SERPAPI_KEY/);assert.equal(records.size,0)});
